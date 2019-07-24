@@ -30,7 +30,7 @@ struct container {
 	/* 此示例程序中无锁队列中的用户数据是 int value */
 	int value;
 	/* 结构体成员变量 member2 是一个lfq无锁队列结点结构体 */
-	struct cds_lfq_node_rcu lfq_node;
+	struct cds_lfq_node_rcu member2;
 	/* 结构体成员变量 member3 仅用于辅助执行RCU回调函数 */
 	struct rcu_head rcu_head;
 };
@@ -77,7 +77,7 @@ int main(int argc, char **argv)
 		 * read-side critical section.
 		 */
 		rcu_read_lock();
-		cds_lfq_enqueue_rcu(&myqueue, &container_ptr->lfq_node);
+		cds_lfq_enqueue_rcu(&myqueue, &container_ptr->member2);
 		rcu_read_unlock();
 	}
 
@@ -87,7 +87,7 @@ int main(int argc, char **argv)
 	 */
 	printf("dequeued content:");
 	for (;;) {
-		struct cds_lfq_node_rcu *lfq_node_ptr;
+		struct cds_lfq_node_rcu *member2_ptr;
 		struct container *container_ptr;
 
 		/*
@@ -95,13 +95,13 @@ int main(int argc, char **argv)
 		 * read-side critical section.
 		 */
 		rcu_read_lock();
-		lfq_node_ptr = cds_lfq_dequeue_rcu(&myqueue);
+		member2_ptr = cds_lfq_dequeue_rcu(&myqueue);
 		rcu_read_unlock();
-		if (!lfq_node_ptr) {
+		if (!member2_ptr) {
 			break;  /* Queue is empty. */
 		}
-		/* Getting the container structure from its member2 (from the "lfq_node" inside "struct container") */
-		container_ptr = get_container_ptr_by_member2(lfq_node_ptr);
+		/* Getting the container structure from its member2 (from the "member2" inside "struct container") */
+		container_ptr = get_container_ptr_by_member2(member2_ptr);
 		printf(" %d", container_ptr->value);
 		CONTAINER_free(container_ptr);
 	}
@@ -127,7 +127,7 @@ void *get_container_ptr_by_member2(struct cds_lfq_node_rcu *member2)
 {
 	uint8_t *container_ptr = (uint8_t *) member2;
 
-	container_ptr -= offsetof(struct container, lfq_node);
+	container_ptr -= offsetof(struct container, member2);
 	return container_ptr;
 }
 
@@ -158,7 +158,7 @@ struct container *CONTAINER_new(int init_value)
 		abort();
 	}
 	ptr->value = init_value;
-	cds_lfq_node_init_rcu(&(ptr->lfq_node));
+	cds_lfq_node_init_rcu(&(ptr->member2));
 	memset(&ptr->rcu_head, 0x00, sizeof(ptr->rcu_head));
 	return (ptr);
 }
