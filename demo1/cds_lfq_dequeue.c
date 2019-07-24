@@ -16,33 +16,39 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <string.h>
 
 #include <urcu.h>		/* RCU flavor */
 #include <urcu/rculfqueue.h>	/* RCU Lock-free queue */
 #include <urcu/compiler.h>	/* For CAA_ARRAY_SIZE */
 
 /*
- * Nodes populated into the queue.
+ * 用户数据容器
  */
-struct mynode {
-	int value;			/* Node content */
-	struct cds_lfq_node_rcu node;	/* Chaining in queue */
-	struct rcu_head rcu_head;	/* For call_rcu() */
+struct container {
+	/* 此示例程序中无锁队列中的用户数据是 int value */
+	int value;
+	/* 结构体成员变量 member2 是一个lfq无锁队列结点结构体 */
+	struct cds_lfq_node_rcu lfq_node;
+	/* 结构体成员变量 member3 仅用于辅助执行RCU回调函数 */
+	struct rcu_head rcu_head;
 };
 
-static
-void free_node(struct rcu_head *head)
-{
-	struct mynode *node =
-		caa_container_of(head, struct mynode, rcu_head);
+extern void *get_container_ptr_by_member2(struct cds_lfq_node_rcu *member2);
+extern void *get_container_ptr_by_member3(struct rcu_head *member3);
 
-	free(node);
-}
+extern struct container *CONTAINER_new(int init_value);
+extern void              CONTAINER_free(struct container *ptr);
+
+typedef struct container *CONTAINER;
+
 
 int main(int argc, char **argv)
 {
 	int values[] = { -5, 42, 36, 24, };
-	struct cds_lfq_queue_rcu myqueue;	/* Queue */
+	unsigned int TOTAL_VALUES = sizeof(values)/sizeof(values[0]);
+	struct cds_lfq_queue_rcu myqueue;   /* Queue */
 	unsigned int i;
 	int ret = 0;
 
@@ -57,23 +63,21 @@ int main(int argc, char **argv)
 	/*
 	 * Enqueue nodes.
 	 */
-	for (i = 0; i < CAA_ARRAY_SIZE(values); i++) {
-		struct mynode *node;
+	for (i = 0; i < TOTAL_VALUES; i++) {
+		struct container *container_ptr;
 
-		node = malloc(sizeof(*node));
-		if (!node) {
+		container_ptr = CONTAINER_new(values[i]);
+		if (!container_ptr) {
 			ret = -1;
 			goto end;
 		}
 
-		cds_lfq_node_init_rcu(&node->node);
-		node->value = values[i];
 		/*
 		 * Both enqueue and dequeue need to be called within RCU
 		 * read-side critical section.
 		 */
 		rcu_read_lock();
-		cds_lfq_enqueue_rcu(&myqueue, &node->node);
+		cds_lfq_enqueue_rcu(&myqueue, &container_ptr->lfq_node);
 		rcu_read_unlock();
 	}
 
@@ -83,23 +87,23 @@ int main(int argc, char **argv)
 	 */
 	printf("dequeued content:");
 	for (;;) {
-		struct cds_lfq_node_rcu *qnode;
-		struct mynode *node;
+		struct cds_lfq_node_rcu *lfq_node_ptr;
+		struct container *container_ptr;
 
 		/*
 		 * Both enqueue and dequeue need to be called within RCU
 		 * read-side critical section.
 		 */
 		rcu_read_lock();
-		qnode = cds_lfq_dequeue_rcu(&myqueue);
+		lfq_node_ptr = cds_lfq_dequeue_rcu(&myqueue);
 		rcu_read_unlock();
-		if (!qnode) {
-			break;	/* Queue is empty. */
+		if (!lfq_node_ptr) {
+			break;  /* Queue is empty. */
 		}
-		/* Getting the container structure from the node */
-		node = caa_container_of(qnode, struct mynode, node);
-		printf(" %d", node->value);
-		call_rcu(&node->rcu_head, free_node);
+		/* Getting the container structure from its member2 (from the "lfq_node" inside "struct container") */
+		container_ptr = get_container_ptr_by_member2(lfq_node_ptr);
+		printf(" %d", container_ptr->value);
+		CONTAINER_free(container_ptr);
 	}
 	printf("\n");
 	/*
@@ -112,4 +116,67 @@ int main(int argc, char **argv)
 end:
 	rcu_unregister_thread();
 	return ret;
+}
+
+/* 自定义函数 */
+
+/*
+ * 计算指针偏移量, 推导出外层 container 结构体的首字节地址
+ */
+void *get_container_ptr_by_member2(struct cds_lfq_node_rcu *member2)
+{
+	uint8_t *container_ptr = (uint8_t *) member2;
+
+	container_ptr -= offsetof(struct container, lfq_node);
+	return container_ptr;
+}
+
+/*
+ * 根据计算指针偏移量, 推导出外层 container 结构体的首字节地址
+ */
+void *get_container_ptr_by_member3(struct rcu_head *member3)
+{
+	uint8_t *container_ptr = (uint8_t *) member3;
+
+	container_ptr -= offsetof(struct container, rcu_head);
+	return container_ptr;
+}
+
+/*
+ * CONTAINER 类的构造函数
+ */
+struct container *CONTAINER_new(int init_value)
+{
+	struct container *ptr = NULL;
+	ptr = malloc(sizeof(struct container));
+	if (!ptr) {
+		#ifndef WRITE_ERROR_LOG
+		#define WRITE_ERROR_LOG(format, ...) fprintf(stderr, format, __VA_ARGS__)
+		#endif
+		WRITE_ERROR_LOG("Error: System is out of memory: %s\n", strerror(errno));
+		WRITE_ERROR_LOG("[SOURCE=%s:LINE=%d:errno=%d]\n", __FILE__, __LINE__, errno);
+		abort();
+	}
+	ptr->value = init_value;
+	cds_lfq_node_init_rcu(&(ptr->lfq_node));
+	memset(&ptr->rcu_head, 0x00, sizeof(ptr->rcu_head));
+	return (ptr);
+}
+
+static
+void CONTAINER_free_callback(struct rcu_head *rcu_head_ptr)
+{
+	struct container *container_ptr = NULL;
+
+	/* Getting the container structure from its member3 (from the "rcu_head" inside "struct container") */
+	container_ptr = get_container_ptr_by_member3(rcu_head_ptr);
+	free(container_ptr);
+}
+
+/*
+ * CONTAINER 类的析构函数
+ */
+void CONTAINER_free(struct container *ptr)
+{
+	call_rcu(&ptr->rcu_head, CONTAINER_free_callback);
 }
